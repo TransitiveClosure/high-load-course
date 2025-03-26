@@ -2,11 +2,13 @@ package ru.quipy.payments.logic
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
+import com.github.dockerjava.api.model.Statistics
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
 import org.slf4j.LoggerFactory
 import ru.quipy.common.utils.SlidingWindowRateLimiter
+import ru.quipy.common.utils.StatisticsService
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
 import java.net.SocketTimeoutException
@@ -38,6 +40,7 @@ class PaymentExternalSystemAdapterImpl(
     private val client = OkHttpClient.Builder().build()
     private val rateLimiter = SlidingWindowRateLimiter(rateLimitPerSec.toLong() - 1, Duration.ofSeconds(1))
     private val semaphore = Semaphore(parallelRequests)
+    private val statisticsService = StatisticsService(requestAverageProcessingTime.toMillis().toDouble());
     private val parallelRequestWaitingTimeMillis = 100L
     private var retryLimit = 3
 
@@ -92,7 +95,10 @@ class PaymentExternalSystemAdapterImpl(
                     semaphore.release()
                     return
                 }
+                val startTime = now()
                 client.newCall(request).execute().use { response ->
+                    statisticsService.addProcessingTime(now() - startTime)
+                    logger.info("request processed by ${now() - startTime}")
                     val body = try {
                         mapper.readValue(response.body?.string(), ExternalSysResponse::class.java)
                     } catch (e: Exception) {
@@ -107,6 +113,7 @@ class PaymentExternalSystemAdapterImpl(
                     paymentESService.update(paymentId) {
                         it.logProcessing(body.result, now(), transactionId, reason = body.message)
                     }
+
                     retryManager.setResponseStatus(body.result);
                 }
             } catch (e: Exception) {
@@ -137,13 +144,14 @@ class PaymentExternalSystemAdapterImpl(
 
     override fun name() = properties.accountName
 
+    fun now() = System.currentTimeMillis()
+
+    fun isDeadlineWillExpired(deadlineTimeMillis: Long, requestAverageProcessingTime: Duration): Boolean  {
+        return now() + statisticsService.get95thPercentValue() >= deadlineTimeMillis
+    }
 }
 
-public fun now() = System.currentTimeMillis()
 
-public fun isDeadlineWillExpired(deadlineTimeMillis: Long, requestAverageProcessingTime: Duration): Boolean  {
-    return now() + requestAverageProcessingTime.toMillis() + requestAverageProcessingTime.toMillis()/4 >= deadlineTimeMillis
-}
 
 class RetryManager(
     private val retryLimit: Int,
