@@ -15,6 +15,7 @@ import java.net.SocketTimeoutException
 import java.time.Duration
 import java.util.*
 import java.util.concurrent.Semaphore
+import java.util.concurrent.TimeUnit
 import kotlin.math.pow
 
 
@@ -37,8 +38,10 @@ class PaymentExternalSystemAdapterImpl(
     private val rateLimitPerSec = properties.rateLimitPerSec
     private val parallelRequests = properties.parallelRequests
 
-    private val client = OkHttpClient.Builder().build()
-    private val rateLimiter = SlidingWindowRateLimiter(rateLimitPerSec.toLong() - 1, Duration.ofSeconds(1))
+    //private var client = OkHttpClient.Builder().callTimeout(requestAverageProcessingTime.toMillis(), TimeUnit.MILLISECONDS).build()
+    private var client = OkHttpClient.Builder().build()
+
+    private val rateLimiter = SlidingWindowRateLimiter(rateLimitPerSec.toLong(), Duration.ofSeconds(1))
     private val semaphore = Semaphore(parallelRequests)
     private val statisticsService = StatisticsService(requestAverageProcessingTime.toMillis().toDouble());
     private val parallelRequestWaitingTimeMillis = 100L
@@ -66,8 +69,10 @@ class PaymentExternalSystemAdapterImpl(
             post(emptyBody)
         }.build()
 
-        rateLimiter.tickBlocking()
-        if (isDeadlineWillExpired(deadline, requestAverageProcessingTime)) {
+        val startRLTime = now()
+        rateLimiter.tickBlocking(deadline)
+        logger.info("Wait rate limiter free ${now() - startRLTime}")
+        if (isDeadlineWillExpired(deadline)) {
             paymentESService.update(paymentId) {
                 it.logProcessing(
                     success = false,
@@ -83,7 +88,7 @@ class PaymentExternalSystemAdapterImpl(
         do {
             try {
 
-                if (isDeadlineWillExpired(deadline, requestAverageProcessingTime)) {
+                if (isDeadlineWillExpired(deadline)) {
                     paymentESService.update(paymentId) {
                         it.logProcessing(
                             success = false,
@@ -96,8 +101,8 @@ class PaymentExternalSystemAdapterImpl(
                     return
                 }
                 val startTime = now()
+                //client = OkHttpClient.Builder().callTimeout(statisticsService.get90thPercentile().toLong(), TimeUnit.MILLISECONDS).build()
                 client.newCall(request).execute().use { response ->
-                    statisticsService.addProcessingTime(now() - startTime)
                     logger.info("request processed by ${now() - startTime}")
                     val body = try {
                         mapper.readValue(response.body?.string(), ExternalSysResponse::class.java)
@@ -105,7 +110,10 @@ class PaymentExternalSystemAdapterImpl(
                         logger.error("[$accountName] [ERROR] Payment processed for txId: $transactionId, payment: $paymentId, result code: ${response.code}, reason: ${response.body?.string()}")
                         ExternalSysResponse(transactionId.toString(), paymentId.toString(), false, e.message)
                     }
-
+                    if (body.result)
+                    {
+                        statisticsService.addProcessingTime(now() - startTime)
+                    }
                     logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}, code: ${response.code}")
 
                     // Здесь мы обновляем состояние оплаты в зависимости от результата в базе данных оплат.
@@ -133,9 +141,12 @@ class PaymentExternalSystemAdapterImpl(
                         }
                     }
                 }
+//                semaphore.release()
+//                return
             }
         } while (retryManager.tryRetry())
         semaphore.release()
+        logger.info("StatValues: ${statisticsService.get90thPercentile()}, ${statisticsService.get95thPercentValue()}")
     }
 
     override fun price() = properties.price
@@ -146,8 +157,8 @@ class PaymentExternalSystemAdapterImpl(
 
     fun now() = System.currentTimeMillis()
 
-    fun isDeadlineWillExpired(deadlineTimeMillis: Long, requestAverageProcessingTime: Duration): Boolean  {
-        return now() + statisticsService.get95thPercentValue() >= deadlineTimeMillis
+    fun isDeadlineWillExpired(deadlineTimeMillis: Long): Boolean  {
+        return now() + statisticsService.get95thPercentValue().toLong() >= deadlineTimeMillis
     }
 }
 
