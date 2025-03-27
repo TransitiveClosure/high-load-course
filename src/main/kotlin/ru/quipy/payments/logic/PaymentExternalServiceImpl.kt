@@ -38,8 +38,8 @@ class PaymentExternalSystemAdapterImpl(
     private val rateLimitPerSec = properties.rateLimitPerSec
     private val parallelRequests = properties.parallelRequests
 
-    //private var client = OkHttpClient.Builder().callTimeout(requestAverageProcessingTime.toMillis(), TimeUnit.MILLISECONDS).build()
-    private var client = OkHttpClient.Builder().build()
+    private var client = OkHttpClient.Builder().callTimeout(requestAverageProcessingTime.toMillis(), TimeUnit.MILLISECONDS).build()
+    //private var client = OkHttpClient.Builder().build()
 
     private val rateLimiter = SlidingWindowRateLimiter(rateLimitPerSec.toLong(), Duration.ofSeconds(1))
     private val semaphore = Semaphore(parallelRequests)
@@ -101,7 +101,7 @@ class PaymentExternalSystemAdapterImpl(
                     return
                 }
                 val startTime = now()
-                //client = OkHttpClient.Builder().callTimeout(statisticsService.get90thPercentile().toLong(), TimeUnit.MILLISECONDS).build()
+                client = OkHttpClient.Builder().callTimeout(statisticsService.get90thPercentile().toLong(), TimeUnit.MILLISECONDS).build()
                 client.newCall(request).execute().use { response ->
                     logger.info("request processed by ${now() - startTime}")
                     val body = try {
