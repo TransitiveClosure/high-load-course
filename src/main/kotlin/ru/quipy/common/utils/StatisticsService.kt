@@ -29,7 +29,7 @@ class StatisticsService (defaultAverageValue: Double) {
     fun get90thPercentile(): Double {
         lock.readLock().lock()
         try {
-            return percentile90
+            return percentile90 * 1.2
         } finally {
             lock.readLock().unlock()
         }
@@ -52,7 +52,7 @@ class StatisticsService (defaultAverageValue: Double) {
         }
 
         val sortedTimes = times.sorted()
-        val index = kotlin.math.ceil(0.9 * sortedTimes.size).toInt() - 1
+        val index = kotlin.math.ceil(0.95 * sortedTimes.size).toInt() - 1
         percentile90 = sortedTimes[index].toDouble()
 
         averageValue = times.average()
