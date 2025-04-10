@@ -2,19 +2,21 @@ package ru.quipy.payments.logic
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
-import com.github.dockerjava.api.model.Statistics
+import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
 import org.slf4j.LoggerFactory
-import ru.quipy.common.utils.SlidingWindowRateLimiter
+import ru.quipy.common.utils.CustomLeakingBucketRateLimiter
 import ru.quipy.common.utils.StatisticsService
 import ru.quipy.core.EventSourcingService
 import ru.quipy.payments.api.PaymentAggregate
 import java.net.SocketTimeoutException
 import java.time.Duration
 import java.util.*
+import java.util.concurrent.Executors
 import java.util.concurrent.Semaphore
+import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import kotlin.math.pow
 
@@ -41,12 +43,12 @@ class PaymentExternalSystemAdapterImpl(
     private var client = OkHttpClient.Builder().callTimeout(requestAverageProcessingTime.toMillis(), TimeUnit.MILLISECONDS).build()
     //private var client = OkHttpClient.Builder().build()
 
-    private val rateLimiter = SlidingWindowRateLimiter(rateLimitPerSec.toLong(), Duration.ofSeconds(1))
+    //    private val rateLimiter = SlidingWindowRateLimiter(rateLimitPerSec.toLong(), Duration.ofSeconds(1))
+    private val rateLimiter = CustomLeakingBucketRateLimiter(rateLimitPerSec.toInt(), 100000)
     private val semaphore = Semaphore(parallelRequests)
     private val statisticsService = StatisticsService(requestAverageProcessingTime.toMillis().toDouble());
     private val parallelRequestWaitingTimeMillis = 100L
-    private var retryLimit = 3
-
+    private var retryLimit = 1
     //private val rateLimiter = FixedWindowRateLimiter(rateLimitPerSec, 1, TimeUnit.SECONDS)
 
     override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
@@ -59,10 +61,6 @@ class PaymentExternalSystemAdapterImpl(
         paymentESService.update(paymentId) {
             it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
         }
-//        while (!semaphore.tryAcquire())
-//        {
-//            Thread.sleep(parallelRequestWaitingTimeMillis);
-//        }
 
         val request = Request.Builder().run {
             url("http://localhost:1234/external/process?serviceName=${serviceName}&accountName=${accountName}&transactionId=$transactionId&paymentId=$paymentId&amount=$amount")
@@ -70,7 +68,7 @@ class PaymentExternalSystemAdapterImpl(
         }.build()
 
         val startRLTime = now()
-        rateLimiter.tickBlocking(deadline)
+        rateLimiter.tickBlocking()
         logger.info("Wait rate limiter free ${now() - startRLTime}")
         if (isDeadlineWillExpired(deadline)) {
             paymentESService.update(paymentId) {
@@ -87,7 +85,10 @@ class PaymentExternalSystemAdapterImpl(
         val retryManager = RetryManager(retryLimit, 10)
         do {
             try {
-
+                if (retryManager.isAfterRetry())
+                {
+                    rateLimiter.tickBlocking(privileged = true)
+                }
                 if (isDeadlineWillExpired(deadline)) {
                     paymentESService.update(paymentId) {
                         it.logProcessing(
@@ -101,7 +102,8 @@ class PaymentExternalSystemAdapterImpl(
                     return
                 }
                 val startTime = now()
-                client = OkHttpClient.Builder().callTimeout(statisticsService.get90thPercentile().toLong(), TimeUnit.MILLISECONDS).build()
+                client = OkHttpClient.Builder()
+                    .callTimeout(statisticsService.get90thPercentile().toLong(), TimeUnit.MILLISECONDS).build()
                 client.newCall(request).execute().use { response ->
                     logger.info("request processed by ${now() - startTime}")
                     val body = try {
@@ -110,8 +112,7 @@ class PaymentExternalSystemAdapterImpl(
                         logger.error("[$accountName] [ERROR] Payment processed for txId: $transactionId, payment: $paymentId, result code: ${response.code}, reason: ${response.body?.string()}")
                         ExternalSysResponse(transactionId.toString(), paymentId.toString(), false, e.message)
                     }
-                    if (body.result)
-                    {
+                    if (body.result) {
                         statisticsService.addProcessingTime(now() - startTime)
                     }
                     logger.warn("[$accountName] Payment processed for txId: $transactionId, payment: $paymentId, succeeded: ${body.result}, message: ${body.message}, code: ${response.code}")
@@ -127,26 +128,31 @@ class PaymentExternalSystemAdapterImpl(
             } catch (e: Exception) {
                 when (e) {
                     is SocketTimeoutException -> {
-                        logger.error("[$accountName] Payment timeout for txId: $transactionId, payment: $paymentId", e)
+                        logger.error(
+                            "[$accountName] Payment timeout for txId: $transactionId, payment: $paymentId",
+                            e
+                        )
                         paymentESService.update(paymentId) {
                             it.logProcessing(false, now(), transactionId, reason = "Request timeout.")
                         }
                     }
 
                     else -> {
-                        logger.error("[$accountName] Payment failed for txId: $transactionId, payment: $paymentId", e)
+                        logger.error(
+                            "[$accountName] Payment failed for txId: $transactionId, payment: $paymentId",
+                            e
+                        )
 
                         paymentESService.update(paymentId) {
                             it.logProcessing(false, now(), transactionId, reason = e.message)
                         }
                     }
                 }
-//                semaphore.release()
-//                return
             }
         } while (retryManager.tryRetry())
         semaphore.release()
         logger.info("StatValues: ${statisticsService.get90thPercentile()}, ${statisticsService.get95thPercentValue()}")
+
     }
 
     override fun price() = properties.price
@@ -184,9 +190,12 @@ class RetryManager(
         return false
     }
 
+    public fun isAfterRetry(): Boolean {
+        return retryCounter != 0
+    }
+
     public fun setResponseStatus(succeeded : Boolean )
     {
         isSuccess = succeeded
     }
 }
-
