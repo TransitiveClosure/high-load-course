@@ -33,8 +33,8 @@ class SlidingWindowRateLimiter(
         }
     }
 
-    fun tickBlocking() {
-        while (!tick()) {
+    fun tickBlocking(deadline: Long) {
+        while (!tick() and (System.currentTimeMillis()  < deadline)) {
             Thread.sleep(10)
         }
     }
