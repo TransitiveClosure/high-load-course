@@ -44,7 +44,7 @@ class PaymentExternalSystemAdapterImpl(
     //private var client = OkHttpClient.Builder().build()
 
     //    private val rateLimiter = SlidingWindowRateLimiter(rateLimitPerSec.toLong(), Duration.ofSeconds(1))
-    private val rateLimiter = CustomLeakingBucketRateLimiter(rateLimitPerSec.toInt(), 100000)
+    private val rateLimiter = CustomLeakingBucketRateLimiter(rateLimitPerSec.toLong(), 100000)
     private val semaphore = Semaphore(parallelRequests)
     private val statisticsService = StatisticsService(requestAverageProcessingTime.toMillis().toDouble());
     private val parallelRequestWaitingTimeMillis = 100L
@@ -103,7 +103,7 @@ class PaymentExternalSystemAdapterImpl(
                 }
                 val startTime = now()
                 client = OkHttpClient.Builder()
-                    .callTimeout(statisticsService.get90thPercentile().toLong(), TimeUnit.MILLISECONDS).build()
+                    .callTimeout(statisticsService.get95thPercentile().toLong(), TimeUnit.MILLISECONDS).build()
                 client.newCall(request).execute().use { response ->
                     logger.info("request processed by ${now() - startTime}")
                     val body = try {
@@ -151,7 +151,7 @@ class PaymentExternalSystemAdapterImpl(
             }
         } while (retryManager.tryRetry())
         semaphore.release()
-        logger.info("StatValues: ${statisticsService.get90thPercentile()}, ${statisticsService.get95thPercentValue()}")
+        logger.info("StatValues: ${statisticsService.get95thPercentile()}, ${statisticsService.get95thPercentValue()}")
 
     }
 
