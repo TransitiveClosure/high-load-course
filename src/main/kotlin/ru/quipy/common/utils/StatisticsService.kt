@@ -1,14 +1,12 @@
 package ru.quipy.common.utils
 
-import java.lang.Math.ceil
 import java.util.*
-import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.locks.ReentrantReadWriteLock
 
 class StatisticsService (defaultAverageValue: Double) {
     private val times = LinkedList<Long>()
     private val lock = ReentrantReadWriteLock()
-    private var percentile90: Double = 0.0
+    private var percentile95: Double = 0.0
     private var maxLength: Int = 1000
     private var standardDeviation: Double = 0.0
     private var averageValue: Double = defaultAverageValue
@@ -26,10 +24,10 @@ class StatisticsService (defaultAverageValue: Double) {
         }
     }
 
-    fun get90thPercentile(): Double {
+    fun get95thPercentile(): Double {
         lock.readLock().lock()
         try {
-            return percentile90 * 1.2
+            return percentile95 * 1.2
         } finally {
             lock.readLock().unlock()
         }
@@ -46,14 +44,14 @@ class StatisticsService (defaultAverageValue: Double) {
 
     private fun recalculateStatistics() {
         if (times.isEmpty()) {
-            percentile90 = 0.0
+            percentile95 = 0.0
             standardDeviation = 0.0
             return
         }
 
         val sortedTimes = times.sorted()
         val index = kotlin.math.ceil(0.95 * sortedTimes.size).toInt() - 1
-        percentile90 = sortedTimes[index].toDouble()
+        percentile95 = sortedTimes[index].toDouble()
 
         averageValue = times.average()
         val variance = times.map { (it - averageValue) * (it - averageValue) }.average()
